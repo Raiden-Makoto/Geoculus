@@ -3,3 +3,8 @@
 *.cif
 debug/
 *.pt
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
