@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 script_dir = Path(__file__).parent
 project_root = script_dir.parent
+sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "data"))
 
 from models.crystalgnn import CrystallGNN
@@ -19,7 +20,13 @@ from build_graphs import PerovskiteDataset
 BATCH_SIZE = 64
 LEARNING_RATE = 0.001
 EPOCHS = 100
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Device selection: CUDA > MPS > CPU
+if torch.cuda.is_available():
+    DEVICE = torch.device('cuda')
+elif torch.backends.mps.is_available():
+    DEVICE = torch.device('mps')
+else:
+    DEVICE = torch.device('cpu')
 
 def train():
     import os
@@ -43,8 +50,8 @@ def train():
     val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=False)
 
     # 2. Initialize Model
-    # These params match the defaults in crystalgnn.py
-    model = CrystallGNN(n_atom_feats=64, n_rbf=50, n_conv=3).to(DEVICE)
+    # n_atom_input=4 for physical features: [Electronegativity, Radius, Mass, Melting]
+    model = CrystallGNN(n_atom_input=4, n_atom_feats=64, n_rbf=50, n_conv=3).to(DEVICE)
     
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     

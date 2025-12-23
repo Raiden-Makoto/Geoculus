@@ -5,10 +5,33 @@ import warnings
 import numpy as np
 import pandas as pd
 from pymatgen.core.structure import Structure
+from pymatgen.core import Element
 import torch
 from torch_geometric.data import Data, Dataset
 from tqdm import tqdm
 warnings.filterwarnings('ignore')
+
+def get_atom_features(element_symbol):
+    """
+    Returns a vector of physical properties:
+    [Electronegativity, Ionic Radius, Melting Point, Atomic Mass]
+    Normalized to roughly 0-1 range for better convergence.
+    """
+    el = Element(element_symbol)
+    
+    # Handle missing data (noble gases etc) with 0.0
+    en = el.X if el.X else 0.0
+    radius = el.atomic_radius if el.atomic_radius else 0.0
+    mass = el.atomic_mass
+    melting = el.melting_point if el.melting_point else 0.0
+    
+    # Simple normalization (roughly 0-1 range helps convergence)
+    return [
+        en / 4.0,           # Electronegativity (max ~4)
+        radius / 3.0,       # Radius (max ~3A)
+        mass / 200.0,       # Mass (max ~200)
+        melting / 3000.0    # Melting point
+    ]
 
 class PerovskiteDataset(Dataset):
     def __init__(self, root, transform=None, pre_transform=None):
@@ -26,7 +49,13 @@ class PerovskiteDataset(Dataset):
         self.structures_dir = os.path.join(root, "raw", "structures")
         
         # Load the dataframe to get targets (Labels)
-        self.df = pd.read_csv(self.csv_file)
+        df = pd.read_csv(self.csv_file)
+        
+        # Filter out thermodynamic disasters: only keep e_hull < 0.5 eV/atom
+        # This removes structures that are too unstable to be useful
+        df_filtered = df[df['e_hull'] < 0.5].copy()
+        print(f"Filtered dataset: {len(df)} -> {len(df_filtered)} samples (removed {len(df) - len(df_filtered)} with e_hull >= 0.5)")
+        self.df = df_filtered.reset_index(drop=True)
         
         super(PerovskiteDataset, self).__init__(root, transform, pre_transform)
 
@@ -37,15 +66,16 @@ class PerovskiteDataset(Dataset):
 
     @property
     def processed_file_names(self):
-        # If these exist, process() is skipped. 
+        # If these exist, process() is skipped.
+        # Note: This uses the filtered dataframe length
         return [f'data_{i}.pt' for i in range(len(self.df))]
 
     def process(self):
         print("Converting CIF files to PyTorch Graphs...")
         
         # We define a cutoff radius for edges (neighbors)
-        radius = 4.0  # Angstroms (Standard for Perovskites)
-        max_neighbors = 12 # Limit max edges per node to save memory
+        radius = 6.0  # Angstroms (Increased to capture 2nd nearest neighbors for large cations)
+        max_neighbors = 20 # Increased to avoid dropping edges for larger structures
 
         for idx, row in tqdm(self.df.iterrows(), total=self.df.shape[0]):
             material_id = row['material_id']
@@ -55,10 +85,11 @@ class PerovskiteDataset(Dataset):
                 # 1. Load Structure
                 crystal = Structure.from_file(cif_path)
 
-                # 2. Extract Node Features (Atomic Numbers)
-                # We simply use the atomic number. The Embedding layer in the model will handle the rest.
-                atomic_numbers = [site.specie.number for site in crystal]
-                x = torch.tensor(atomic_numbers, dtype=torch.long).unsqueeze(1) 
+                # 2. Extract Node Features (Physical Properties)
+                # Use physical features instead of atomic numbers for better learning
+                atom_features = [get_atom_features(site.specie.symbol) for site in crystal]
+                x = torch.tensor(atom_features, dtype=torch.float)
+                # x shape is now [Num_Atoms, 4] instead of [Num_Atoms, 1] 
 
                 # 3. Extract Edges (Connectivity)
                 # Get all neighbors within radius

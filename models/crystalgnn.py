@@ -7,15 +7,16 @@ from .layers import *
 class CrystallGNN(nn.Module):
     def __init__(
         self,
+        n_atom_input: int=4,  # Physical features: [EN, Radius, Mass, Melting]
         n_atom_feats: int=64,
         n_rbf: int=10,
         n_conv: int=3,
         n_hidden_head: int=64
     ):
         super().__init__()
-        # 1. Embedding Layer
-        # 95 is safe for elements up to Am (Z=95)
-        self.embedding = nn.Embedding(95, n_atom_feats)
+        # 1. Embedding Layer - Project physical features into hidden dimension
+        # Replaced nn.Embedding with nn.Linear to handle float features
+        self.embedding = nn.Linear(n_atom_input, n_atom_feats)
         self.rbf = GaussianSmearing(start=0.0, stop=6.0, num_gaussians=n_rbf)
         
         # 2. Backbone (Message Passing Stack)
@@ -40,7 +41,8 @@ class CrystallGNN(nn.Module):
     def forward(self, data):
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
         # 1. Embeddings
-        x = self.embedding(x.squeeze())         # Atoms: [N] -> [N, 64]
+        # x is now [N, 4] (physical features) instead of [N, 1] (atomic numbers)
+        x = self.embedding(x)                   # Atoms: [N, 4] -> [N, 64]
         edge_attr = self.rbf(edge_attr)         # Edges: [E, 1] -> [E, 50]
         
         # 2. Message Passing Backbone
