@@ -14,7 +14,7 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "data"))
 
 from models.crystalgnn import CrystallGNN
-from build_graphs import PerovskiteDataset
+from build_graphs import PerovskiteDataset #type: ignore
 
 # --- CONFIGURATION ---
 BATCH_SIZE = 64
@@ -46,12 +46,15 @@ def train():
     val_size = len(full_dataset) - train_size
     train_set, val_set = torch.utils.data.random_split(full_dataset, [train_size, val_size])
     
-    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=False)
+    # Set num_workers=0 to avoid multiprocessing issues with MPS
+    # MPS has known compatibility issues with PyTorch Geometric multiprocessing
+    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
     # 2. Initialize Model
     # n_atom_input=4 for physical features: [Electronegativity, Radius, Mass, Melting]
-    model = CrystallGNN(n_atom_input=4, n_atom_feats=64, n_rbf=50, n_conv=3).to(DEVICE)
+    # n_global_feats=2 for global features: [tolerance_factor, packing_fraction]
+    model = CrystallGNN(n_atom_input=4, n_atom_feats=64, n_global_feats=2, n_rbf=50, n_conv=3).to(DEVICE)
     
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     

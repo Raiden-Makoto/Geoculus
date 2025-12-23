@@ -33,6 +33,36 @@ def get_atom_features(element_symbol):
         melting / 3000.0    # Melting point
     ]
 
+def calculate_tolerance_factor(structure):
+    """
+    Heuristic to estimate Tolerance Factor from the structure.
+    Assumes standard Perovskite ABX3 occupancy.
+    Goldschmidt Tolerance Factor: t = (r_A + r_X) / (sqrt(2) * (r_B + r_X))
+    """
+    try:
+        # A simple guess: A-site is usually the largest cation, X is anion
+        # (This is a simplified logic for clean datasets)
+        elements = [site.specie for site in structure]
+        anions = [e for e in elements if e.X > 2.0] # High electronegativity = Anion
+        cations = [e for e in elements if e.X <= 2.0]
+        
+        if not anions or not cations: 
+            return 1.0 # Fallback
+        
+        r_x = np.mean([e.atomic_radius if e.atomic_radius else 1.0 for e in anions])
+        # Largest cation is likely A-site, Smaller is B-site
+        r_cations = sorted([e.atomic_radius if e.atomic_radius else 1.0 for e in cations])
+        if len(r_cations) < 2: 
+            return 1.0
+        
+        r_b = r_cations[0] # Smallest cation
+        r_a = r_cations[-1] # Largest cation
+        
+        t = (r_a + r_x) / (np.sqrt(2) * (r_b + r_x))
+        return float(t)
+    except:
+        return 1.0
+
 class PerovskiteDataset(Dataset):
     def __init__(self, root, transform=None, pre_transform=None):
         """
@@ -85,6 +115,13 @@ class PerovskiteDataset(Dataset):
                 # 1. Load Structure
                 crystal = Structure.from_file(cif_path)
 
+                # --- NEW: Calculate Global Physics Features ---
+                t_factor = calculate_tolerance_factor(crystal)
+                packing_fraction = len(crystal) / crystal.volume  # Density proxy
+                
+                # Create a global feature vector (Shape: [1, 2])
+                u = torch.tensor([[t_factor, packing_fraction]], dtype=torch.float)
+
                 # 2. Extract Node Features (Physical Properties)
                 # Use physical features instead of atomic numbers for better learning
                 atom_features = [get_atom_features(site.specie.symbol) for site in crystal]
@@ -124,6 +161,7 @@ class PerovskiteDataset(Dataset):
                             edge_attr=edge_attr, 
                             y_bandgap=y_bandgap,
                             y_ehull=y_ehull,
+                            u=u,  # Global features: [tolerance_factor, packing_fraction]
                             material_id=material_id)
 
                 # Save the single graph

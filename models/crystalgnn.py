@@ -9,6 +9,7 @@ class CrystallGNN(nn.Module):
         self,
         n_atom_input: int=4,  # Physical features: [EN, Radius, Mass, Melting]
         n_atom_feats: int=64,
+        n_global_feats: int=2,  # Global features: [tolerance_factor, packing_fraction]
         n_rbf: int=10,
         n_conv: int=3,
         n_hidden_head: int=64
@@ -29,8 +30,9 @@ class CrystallGNN(nn.Module):
         self.pooling = global_mean_pool
         
         # 4. Regression Heads (Multi-Task)
-        # Shared dense layer before splitting
-        self.fc_shared = nn.Linear(n_atom_feats, n_hidden_head * 2)
+        # Fusion Layer: Concatenate Graph Vector (64) + Global Features (2)
+        fusion_dim = n_atom_feats + n_global_feats
+        self.fc_shared = nn.Linear(fusion_dim, n_hidden_head * 2)
         
         # Task 1: Band Gap
         self.head_bandgap = OutputHead(n_hidden_head * 2, n_hidden_head)
@@ -53,6 +55,18 @@ class CrystallGNN(nn.Module):
         # 3. Global Aggregation (Crystal Fingerprint)
         # x is [N_atoms, 64], batch is [N_atoms] -> c is [Batch_Size, 64]
         c = self.pooling(x, batch)
+        
+        # --- NEW: Inject Global Features ---
+        # data.u is [Batch, 2] after batching (PyG automatically stacks them)
+        # Handle both single graph [1, 2] and batched [Batch, 2] cases
+        u = data.u
+        if u.dim() == 3:
+            u = u.squeeze(1)  # [Batch, 1, 2] -> [Batch, 2]
+        elif u.dim() == 1:
+            u = u.unsqueeze(0)  # [2] -> [1, 2] for single graph
+        # Ensure u is on same device as c
+        u = u.to(c.device)
+        c = torch.cat([c, u], dim=1)
         
         # 4. Prediction
         c = F.relu(self.fc_shared(c))
