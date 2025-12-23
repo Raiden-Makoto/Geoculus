@@ -34,7 +34,7 @@ def calculate_tolerance_factor(r_a, r_b, r_x):
 def generate_hypothetical_materials():
     # Get the script's directory and build paths relative to project root
     script_dir = Path(__file__).parent
-    project_root = script_dir
+    project_root = script_dir.parent  # Go up from scripts/ to project root
     output_dir = project_root / "candidates"
     
     output_dir.mkdir(exist_ok=True)

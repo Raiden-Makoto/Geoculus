@@ -112,7 +112,7 @@ class PerovskiteDataset(Dataset):
 if __name__ == "__main__":
     # Get the script's directory and build absolute path to dataset
     script_dir = Path(__file__).parent
-    project_root = script_dir
+    project_root = script_dir.parent  # Go up from data/ to project root
     dataset_root = project_root / "dataset"
     
     # Ensure your folder structure matches:

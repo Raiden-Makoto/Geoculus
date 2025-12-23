@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool
-from layers import *
+from .layers import *
 
 class CrystallGNN(nn.Module):
     def __init__(
