@@ -118,15 +118,6 @@ The generator uses **Goldschmidt tolerance factor** filtering (0.8–1.1) to ens
 
 **Result:** Generated 90 exotic candidates, identified 14 in the Goldilocks Zone, including **novel Hafnium chalcogenides** that are almost completely unexplored in the literature.
 
-## Conclusion
-
-This project demonstrates an end-to-end workflow in Materials Informatics. By combining custom graph engineering with state-of-the-art deep learning, we:
-
-1. **Validated** the model by rediscovering known materials (BaZrS$_3$)
-2. **Discovered** novel materials (BaHfS$_3$, SrHfS$_3$, EuTiS$_3$) that do not exist in standard textbooks but are physically plausible according to the AI
-
-The model successfully moved from "zero" to "discovering novel Hafnium chalcogenides" using a Graph Neural Network, demonstrating that AI can guide exploration beyond the known chemical space. The **Hafnium-based materials** (BaHfS$_3$, SrHfS$_3$) are particularly promising as they are chemically similar to the proven BaZrS$_3$ but remain almost completely unexplored for solar applications.
-
 ## Future Work
 
 ### Computational Verification (DFT)
