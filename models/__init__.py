@@ -1,6 +1,6 @@
 """Models package for Geoculus project."""
-from .crystalgnn import CrystallGNN
-from .layers import GaussianSmearing, InteractionBlock, OutputHead
+from .alignn import ALIGNN
+from .layers import GaussianSmearing, GatedGCN
 
-__all__ = ["CrystallGNN", "GaussianSmearing", "InteractionBlock", "OutputHead"]
+__all__ = ["ALIGNN", "GaussianSmearing", "GatedGCN"]
 

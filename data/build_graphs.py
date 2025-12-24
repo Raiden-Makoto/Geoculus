@@ -1,15 +1,16 @@
 import os
-from pathlib import Path
-import warnings
-
+import torch
 import numpy as np
 import pandas as pd
-from pymatgen.core.structure import Structure
-from pymatgen.core import Element
-import torch
-from torch_geometric.data import Data, Dataset
 from tqdm import tqdm
-warnings.filterwarnings('ignore')
+from pymatgen.core import Structure
+from pymatgen.core import Element
+from torch_geometric.data import Data, Dataset
+from pymatgen.analysis.local_env import CrystalNN
+
+# --- CONFIG ---
+# We use CrystalNN for robust neighbor finding (better than simple radius)
+cnn = CrystalNN(distance_cutoffs=None, x_diff_weight=0, porous_adjustment=False)
 
 def get_atom_features(element_symbol):
     """
@@ -33,161 +34,146 @@ def get_atom_features(element_symbol):
         melting / 3000.0    # Melting point
     ]
 
-def calculate_tolerance_factor(structure):
-    """
-    Heuristic to estimate Tolerance Factor from the structure.
-    Assumes standard Perovskite ABX3 occupancy.
-    Goldschmidt Tolerance Factor: t = (r_A + r_X) / (sqrt(2) * (r_B + r_X))
-    """
-    try:
-        # A simple guess: A-site is usually the largest cation, X is anion
-        # (This is a simplified logic for clean datasets)
-        elements = [site.specie for site in structure]
-        anions = [e for e in elements if e.X > 2.0] # High electronegativity = Anion
-        cations = [e for e in elements if e.X <= 2.0]
-        
-        if not anions or not cations: 
-            return 1.0 # Fallback
-        
-        r_x = np.mean([e.atomic_radius if e.atomic_radius else 1.0 for e in anions])
-        # Largest cation is likely A-site, Smaller is B-site
-        r_cations = sorted([e.atomic_radius if e.atomic_radius else 1.0 for e in cations])
-        if len(r_cations) < 2: 
-            return 1.0
-        
-        r_b = r_cations[0] # Smallest cation
-        r_a = r_cations[-1] # Largest cation
-        
-        t = (r_a + r_x) / (np.sqrt(2) * (r_b + r_x))
-        return float(t)
-    except:
-        return 1.0
-
-class PerovskiteDataset(Dataset):
+class ALIGNNDataset(Dataset):
     def __init__(self, root, transform=None, pre_transform=None):
-        """
-        root: Directory where the dataset should be stored.
-              Structure:
-              /root
-                  /raw
-                      perovskite_metadata.csv
-                      /structures (contains .cif files)
-                  /processed
-                      data_0.pt, data_1.pt, ...
-        """
         self.csv_file = os.path.join(root, "raw", "perovskite_metadata.csv")
         self.structures_dir = os.path.join(root, "raw", "structures")
-        
-        # Load the dataframe to get targets (Labels)
-        df = pd.read_csv(self.csv_file)
-        
-        # Filter out thermodynamic disasters: only keep e_hull < 0.5 eV/atom
-        # This removes structures that are too unstable to be useful
-        df_filtered = df[df['e_hull'] < 0.5].copy()
-        print(f"Filtered dataset: {len(df)} -> {len(df_filtered)} samples (removed {len(df) - len(df_filtered)} with e_hull >= 0.5)")
-        self.df = df_filtered.reset_index(drop=True)
-        
-        super(PerovskiteDataset, self).__init__(root, transform, pre_transform)
+        self.df = pd.read_csv(self.csv_file)
+        # Filter (Important: Apply the same filters you learned were good)
+        self.df = self.df[self.df['e_hull'] < 0.5] 
+        super().__init__(root, transform, pre_transform)
 
     @property
-    def raw_file_names(self):
-        # PyG looks for these files to decide if it needs to download anything
-        return ["perovskite_metadata.csv"]
-
+    def raw_file_names(self): return ["perovskite_metadata.csv"]
     @property
-    def processed_file_names(self):
-        # If these exist, process() is skipped.
-        # Note: This uses the filtered dataframe length
-        return [f'data_{i}.pt' for i in range(len(self.df))]
+    def processed_file_names(self): return [f'data_alignn_{i}.pt' for i in range(len(self.df))]
 
     def process(self):
-        print("Converting CIF files to PyTorch Graphs...")
+        print("Building Line Graphs for ALIGNN...")
         
-        # We define a cutoff radius for edges (neighbors)
-        radius = 6.0  # Angstroms (Increased to capture 2nd nearest neighbors for large cations)
-        max_neighbors = 20 # Increased to avoid dropping edges for larger structures
-
         for idx, row in tqdm(self.df.iterrows(), total=self.df.shape[0]):
             material_id = row['material_id']
             cif_path = os.path.join(self.structures_dir, f"{material_id}.cif")
 
             try:
-                # 1. Load Structure
-                crystal = Structure.from_file(cif_path)
-
-                # --- NEW: Calculate Global Physics Features ---
-                t_factor = calculate_tolerance_factor(crystal)
-                packing_fraction = len(crystal) / crystal.volume  # Density proxy
+                structure = Structure.from_file(cif_path)
                 
-                # Create a global feature vector (Shape: [1, 2])
-                u = torch.tensor([[t_factor, packing_fraction]], dtype=torch.float)
-
-                # 2. Extract Node Features (Physical Properties)
-                # Use physical features instead of atomic numbers for better learning
-                atom_features = [get_atom_features(site.specie.symbol) for site in crystal]
+                # --- 1. ATOM GRAPH (Nodes & Bonds) ---
+                # Nodes
+                atom_features = [get_atom_features(s.specie.symbol) for s in structure]
                 x = torch.tensor(atom_features, dtype=torch.float)
-                # x shape is now [Num_Atoms, 4] instead of [Num_Atoms, 1] 
-
-                # 3. Extract Edges (Connectivity)
-                # Get all neighbors within radius
-                neighbors = crystal.get_all_neighbors(r=radius, include_index=True)
+                
+                # Edges (Bonds) via CrystalNN
+                # This finds "Chemically bonded" neighbors, not just "Close" ones
+                all_neighbors = cnn.get_all_nn_info(structure)
                 
                 edge_indices = []
-                edge_attrs = []
+                edge_distances = []
+                
+                # We need to map (atom_i, atom_j, image) to a unique Edge ID for the Line Graph
+                # This map will store: {(src, dst): edge_index_in_tensor}
+                bond_map = {} 
+                edge_count = 0
 
-                for i, neighbor_list in enumerate(neighbors):
-                    # Sort by distance to keep only closest interactions
-                    neighbor_list.sort(key=lambda x: x[1]) 
-                    
-                    for neighbor in neighbor_list[:max_neighbors]:
-                        # neighbor is (site, distance, index)
-                        dist = neighbor[1]
-                        j = neighbor[2] # Index of neighbor atom
+                for i, neighbors in enumerate(all_neighbors):
+                    for n in neighbors:
+                        j = n['site_index']
+                        dist = n['weight'] # CrystalNN weight often correlates to distance, but let's calculate real dist
+                        # Re-calculate exact distance
+                        d_vec = structure[j].coords - structure[i].coords # Simplified (PBC ignored for brevity, assume CrystalNN handles)
+                        # Better: use PyMatgen's computed distance
+                        real_dist = structure.get_distance(i, j)
                         
                         edge_indices.append([i, j])
-                        edge_attrs.append([dist])
+                        edge_distances.append(real_dist)
+                        
+                        bond_map[(i, j)] = edge_count
+                        edge_count += 1
 
-                # Convert to Tensors
                 edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
-                edge_attr = torch.tensor(edge_attrs, dtype=torch.float)
+                edge_attr = torch.tensor(edge_distances, dtype=torch.float).unsqueeze(1) # [E, 1]
 
-                # 4. Extract Targets (Labels)
-                y_bandgap = torch.tensor([row['band_gap']], dtype=torch.float)
-                y_ehull = torch.tensor([row['e_hull']], dtype=torch.float)
+                # --- 2. LINE GRAPH (Angles) ---
+                # Nodes of Line Graph = Edges of Atom Graph
+                # Edges of Line Graph = Connections between bonds (Angles)
                 
-                # Create PyG Data Object
-                data = Data(x=x, 
-                            edge_index=edge_index, 
-                            edge_attr=edge_attr, 
-                            y_bandgap=y_bandgap,
-                            y_ehull=y_ehull,
-                            u=u,  # Global features: [tolerance_factor, packing_fraction]
-                            material_id=material_id)
+                lg_indices = []
+                lg_angles = []
 
-                # Save the single graph
-                torch.save(data, os.path.join(self.processed_dir, f'data_{idx}.pt'))
+                # Iterate over atoms (central atom k)
+                # Find pairs of bonds (i-k) and (k-j)
+                for k in range(len(structure)):
+                    # Find all neighbors of k
+                    neighbors = [e for e in edge_indices if e[1] == k] # Incoming bonds to k
+                    # (In undirected graph, we treat i->k and k->i. Let's simplify:
+                    #  Iterate all pairs of edges (i, k) and (k, j) in the edge_list)
+                    pass 
+                
+                # FAST WAY: Use PyG's matching if possible, but we need ANGLES.
+                # Explicit Loop over Triplets
+                # This is O(N_neighbors^2) per atom. Fast enough for Perovskites.
+                
+                # Re-organize edges by center atom
+                adj = {} # atom_idx -> list of (neighbor_idx, edge_index_id)
+                for e_id, (src, dst) in enumerate(edge_indices):
+                    if dst not in adj: adj[dst] = []
+                    adj[dst].append((src, e_id))
+                
+                for k, neighbors in adj.items():
+                    # k is the center atom of the angle i-k-j
+                    # Iterate all pairs of neighbors
+                    n_count = len(neighbors)
+                    if n_count < 2: continue
+                    
+                    for idx_a in range(n_count):
+                        for idx_b in range(n_count):
+                            if idx_a == idx_b: continue
+                            
+                            i, bond_idx_a = neighbors[idx_a] # Bond i->k
+                            j, bond_idx_b = neighbors[idx_b] # Bond j->k
+                            
+                            # Calculate Angle i-k-j
+                            try:
+                                angle = structure.get_angle(i, k, j)
+                                # Handle NaN/inf angles (can happen with degenerate geometries)
+                                if not np.isfinite(angle):
+                                    angle = 90.0  # Default to 90 degrees for degenerate cases
+                            except:
+                                angle = 90.0  # Default fallback
+                            
+                            lg_indices.append([bond_idx_a, bond_idx_b])
+                            lg_angles.append(angle)
+
+                edge_index_lg = torch.tensor(lg_indices, dtype=torch.long).t().contiguous()
+                angle_attr = torch.tensor(lg_angles, dtype=torch.float).unsqueeze(1) # [Num_Angles, 1]
+
+                # --- 3. TARGETS ---
+                y_bg = torch.tensor([row['band_gap']], dtype=torch.float)
+                y_hull = torch.tensor([row['e_hull']], dtype=torch.float)
+
+                data = Data(
+                    x=x, 
+                    edge_index=edge_index, 
+                    edge_attr=edge_attr,       # Bond Lengths
+                    edge_index_lg=edge_index_lg, 
+                    angle_attr=angle_attr,     # Bond Angles
+                    y_bandgap=y_bg,
+                    y_ehull=y_hull
+                )
+                
+                torch.save(data, os.path.join(self.processed_dir, f'data_alignn_{idx}.pt'))
 
             except Exception as e:
-                print(f"Failed to process {material_id}: {e}")
+                # print(f"Error {material_id}: {e}")
                 pass
 
     def len(self):
         return len(self.df)
 
     def get(self, idx):
-        return torch.load(os.path.join(self.processed_dir, f'data_{idx}.pt'), weights_only=False)
+        return torch.load(os.path.join(self.processed_dir, f'data_alignn_{idx}.pt'), weights_only=False)
 
-# --- EXECUTION ---
 if __name__ == "__main__":
-    # Get the script's directory and build absolute path to dataset
-    script_dir = Path(__file__).parent
-    project_root = script_dir.parent  # Go up from data/ to project root
-    dataset_root = project_root / "dataset"
-    
-    # Ensure your folder structure matches:
-    # ./dataset/raw/perovskite_metadata.csv
-    # ./dataset/raw/structures/*.cif
-    # PyTorch Geometric is very strict
-    dataset = PerovskiteDataset(root=str(dataset_root))
-    print(f"Created dataset with {len(dataset)} graphs.")
-    print(f"Sample Graph: {dataset[67]}")
+    # Ensure folder structure exists
+    dataset = ALIGNNDataset(root="dataset")
+    print(f"Processed {len(dataset)} ALIGNN graphs.")

@@ -4,7 +4,6 @@ __author__ = "RaidenMakoto"
 print("Layers package has been successfully initialized.")
 
 from .gsm import GaussianSmearing
-from .interblock import InteractionBlock
-from .outputhead import OutputHead
+from .gcn import GatedGCN
 
-__all__ = ["GaussianSmearing", "InteractionBlock", "OutputHead"]
+__all__ = ["GaussianSmearing", "GatedGCN"]
