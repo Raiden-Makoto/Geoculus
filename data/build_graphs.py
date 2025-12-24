@@ -6,11 +6,6 @@ from tqdm import tqdm
 from pymatgen.core import Structure
 from pymatgen.core import Element
 from torch_geometric.data import Data, Dataset
-from pymatgen.analysis.local_env import CrystalNN
-
-# --- CONFIG ---
-# We use CrystalNN for robust neighbor finding (better than simple radius)
-cnn = CrystalNN(distance_cutoffs=None, x_diff_weight=0, porous_adjustment=False)
 
 def get_atom_features(element_symbol):
     """
@@ -39,7 +34,6 @@ class ALIGNNDataset(Dataset):
         self.csv_file = os.path.join(root, "raw", "perovskite_metadata.csv")
         self.structures_dir = os.path.join(root, "raw", "structures")
         self.df = pd.read_csv(self.csv_file)
-        # Filter (Important: Apply the same filters you learned were good)
         self.df = self.df[self.df['e_hull'] < 0.5] 
         super().__init__(root, transform, pre_transform)
 
@@ -49,7 +43,7 @@ class ALIGNNDataset(Dataset):
     def processed_file_names(self): return [f'data_alignn_{i}.pt' for i in range(len(self.df))]
 
     def process(self):
-        print("Building Line Graphs for ALIGNN...")
+        print("Building CORRECTED ALIGNN Graphs (Vector Math)...")
         
         for idx, row in tqdm(self.df.iterrows(), total=self.df.shape[0]):
             material_id = row['material_id']
@@ -58,113 +52,98 @@ class ALIGNNDataset(Dataset):
             try:
                 structure = Structure.from_file(cif_path)
                 
-                # --- 1. ATOM GRAPH (Nodes & Bonds) ---
-                # Nodes
+                # --- 1. ATOM GRAPH ---
+                radius = 5.0
+                # Get neighbors WITH vectors
+                # neighbor structure: (site, distance, index, image)
+                neighbors = structure.get_all_neighbors(r=radius, include_index=True)
+                
                 atom_features = [get_atom_features(s.specie.symbol) for s in structure]
                 x = torch.tensor(atom_features, dtype=torch.float)
                 
-                # Edges (Bonds) via CrystalNN
-                # This finds "Chemically bonded" neighbors, not just "Close" ones
-                all_neighbors = cnn.get_all_nn_info(structure)
-                
                 edge_indices = []
-                edge_distances = []
+                edge_attrs = []
                 
-                # We need to map (atom_i, atom_j, image) to a unique Edge ID for the Line Graph
-                # This map will store: {(src, dst): edge_index_in_tensor}
-                bond_map = {} 
-                edge_count = 0
+                # Store vectors for angle calculation later
+                # key: bond_id -> vector (numpy array)
+                bond_vectors = {} 
+                
+                # Group bonds by center atom for line graph
+                # key: center_atom_idx -> list of bond_ids
+                center_to_bonds = {i: [] for i in range(len(structure))}
+                
+                bond_count = 0
 
-                for i, neighbors in enumerate(all_neighbors):
-                    for n in neighbors:
-                        j = n['site_index']
-                        dist = n['weight'] # CrystalNN weight often correlates to distance, but let's calculate real dist
-                        # Re-calculate exact distance
-                        d_vec = structure[j].coords - structure[i].coords # Simplified (PBC ignored for brevity, assume CrystalNN handles)
-                        # Better: use PyMatgen's computed distance
-                        real_dist = structure.get_distance(i, j)
+                for i, neighbor_list in enumerate(neighbors):
+                    neighbor_list.sort(key=lambda x: x[1])
+                    
+                    for n in neighbor_list[:12]: # Max 12 neighbors
+                        dist = n[1]
+                        j = n[2]
+                        neighbor_site = n[0]
+                        
+                        # Vector from Center (i) to Neighbor (j)
+                        # We must use the specific coords of the neighbor image
+                        v = neighbor_site.coords - structure[i].coords
                         
                         edge_indices.append([i, j])
-                        edge_distances.append(real_dist)
+                        edge_attrs.append([dist])
                         
-                        bond_map[(i, j)] = edge_count
-                        edge_count += 1
-
-                edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
-                edge_attr = torch.tensor(edge_distances, dtype=torch.float).unsqueeze(1) # [E, 1]
-
-                # --- 2. LINE GRAPH (Angles) ---
-                # Nodes of Line Graph = Edges of Atom Graph
-                # Edges of Line Graph = Connections between bonds (Angles)
+                        # Store info for Line Graph
+                        bond_vectors[bond_count] = v
+                        center_to_bonds[i].append(bond_count)
+                        
+                        bond_count += 1
                 
+                edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
+                edge_attr = torch.tensor(edge_attrs, dtype=torch.float).unsqueeze(1)
+
+                # --- 2. LINE GRAPH (True Geometric Angles) ---
                 lg_indices = []
                 lg_angles = []
-
-                # Iterate over atoms (central atom k)
-                # Find pairs of bonds (i-k) and (k-j)
+                
                 for k in range(len(structure)):
-                    # Find all neighbors of k
-                    neighbors = [e for e in edge_indices if e[1] == k] # Incoming bonds to k
-                    # (In undirected graph, we treat i->k and k->i. Let's simplify:
-                    #  Iterate all pairs of edges (i, k) and (k, j) in the edge_list)
-                    pass 
-                
-                # FAST WAY: Use PyG's matching if possible, but we need ANGLES.
-                # Explicit Loop over Triplets
-                # This is O(N_neighbors^2) per atom. Fast enough for Perovskites.
-                
-                # Re-organize edges by center atom
-                adj = {} # atom_idx -> list of (neighbor_idx, edge_index_id)
-                for e_id, (src, dst) in enumerate(edge_indices):
-                    if dst not in adj: adj[dst] = []
-                    adj[dst].append((src, e_id))
-                
-                for k, neighbors in adj.items():
-                    # k is the center atom of the angle i-k-j
-                    # Iterate all pairs of neighbors
-                    n_count = len(neighbors)
-                    if n_count < 2: continue
+                    bonds = center_to_bonds[k]
+                    if len(bonds) < 2: continue
                     
-                    for idx_a in range(n_count):
-                        for idx_b in range(n_count):
+                    # Double loop to find all pairs (angles) around atom k
+                    for idx_a in range(len(bonds)):
+                        for idx_b in range(len(bonds)):
                             if idx_a == idx_b: continue
                             
-                            i, bond_idx_a = neighbors[idx_a] # Bond i->k
-                            j, bond_idx_b = neighbors[idx_b] # Bond j->k
+                            bond_id_a = bonds[idx_a]
+                            bond_id_b = bonds[idx_b]
                             
-                            # Calculate Angle i-k-j
-                            try:
-                                angle = structure.get_angle(i, k, j)
-                                # Handle NaN/inf angles (can happen with degenerate geometries)
-                                if not np.isfinite(angle):
-                                    angle = 90.0  # Default to 90 degrees for degenerate cases
-                            except:
-                                angle = 90.0  # Default fallback
+                            v1 = bond_vectors[bond_id_a]
+                            v2 = bond_vectors[bond_id_b]
                             
-                            lg_indices.append([bond_idx_a, bond_idx_b])
-                            lg_angles.append(angle)
+                            # Calculate Angle using Dot Product
+                            # theta = arccos( (v1 . v2) / (|v1| * |v2|) )
+                            dot = np.dot(v1, v2)
+                            norm_mul = np.linalg.norm(v1) * np.linalg.norm(v2)
+                            
+                            # Clip to handle floating point noise > 1.0 or < -1.0
+                            cosine = np.clip(dot / (norm_mul + 1e-8), -1.0, 1.0)
+                            angle_rad = np.arccos(cosine)
+                            angle_deg = np.degrees(angle_rad)
+                            
+                            lg_indices.append([bond_id_a, bond_id_b])
+                            lg_angles.append([angle_deg])
 
                 edge_index_lg = torch.tensor(lg_indices, dtype=torch.long).t().contiguous()
-                angle_attr = torch.tensor(lg_angles, dtype=torch.float).unsqueeze(1) # [Num_Angles, 1]
+                angle_attr = torch.tensor(lg_angles, dtype=torch.float)
 
-                # --- 3. TARGETS ---
+                # --- 3. Save ---
                 y_bg = torch.tensor([row['band_gap']], dtype=torch.float)
                 y_hull = torch.tensor([row['e_hull']], dtype=torch.float)
 
-                data = Data(
-                    x=x, 
-                    edge_index=edge_index, 
-                    edge_attr=edge_attr,       # Bond Lengths
-                    edge_index_lg=edge_index_lg, 
-                    angle_attr=angle_attr,     # Bond Angles
-                    y_bandgap=y_bg,
-                    y_ehull=y_hull
-                )
+                data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, 
+                            edge_index_lg=edge_index_lg, angle_attr=angle_attr,
+                            y_bandgap=y_bg, y_ehull=y_hull, material_id=material_id)
                 
                 torch.save(data, os.path.join(self.processed_dir, f'data_alignn_{idx}.pt'))
 
             except Exception as e:
-                # print(f"Error {material_id}: {e}")
                 pass
 
     def len(self):
