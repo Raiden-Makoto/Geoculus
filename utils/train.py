@@ -17,7 +17,7 @@ from models.alignn import ALIGNN
 from build_graphs import ALIGNNDataset #type: ignore
 
 # --- CONFIGURATION ---
-BATCH_SIZE = 128  # Increased for better GPU utilization
+BATCH_SIZE = 64  # Reduced for lower memory usage
 LEARNING_RATE = 1e-3
 EPOCHS = 100
 VALIDATE_EVERY = 5  # Validate every N epochs instead of every epoch

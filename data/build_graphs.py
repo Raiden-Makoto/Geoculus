@@ -77,7 +77,7 @@ class ALIGNNDataset(Dataset):
                 for i, neighbor_list in enumerate(neighbors):
                     neighbor_list.sort(key=lambda x: x[1])
                     
-                    for n in neighbor_list[:12]: # Max 12 neighbors
+                    for n in neighbor_list[:8]: # Max 8 neighbors (6 B-X + 2 A-site)
                         dist = n[1]
                         j = n[2]
                         neighbor_site = n[0]

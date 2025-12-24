@@ -1,4 +1,6 @@
+import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from torch_geometric.nn import global_mean_pool
 from .layers import GaussianSmearing, GatedGCN #
 
@@ -47,15 +49,20 @@ class ALIGNN(nn.Module):
         m = self.rbf_bond(data.edge_attr)           
         a = self.rbf_angle(data.angle_attr)         
         
-        # B. ALIGNN Iterations
+        # B. ALIGNN Iterations (Checkpointed)
         for i in range(len(self.atom_layers)):
+            
             # 1. Update Bonds (Line Graph)
-            # Input: Bond Features (m), Graph: Angles (lg_index, a)
-            m = self.line_layers[i](x=m, edge_index=data.edge_index_lg, edge_attr=a)
+            # We wrap the call in checkpoint()
+            # Note: inputs to checkpoint must carry grad or use_reentrant=False logic applies. 
+            # h and m carry grad, edge_index does not. This is fine.
+            
+            # Original: m = self.line_layers[i](m, data.edge_index_lg, a)
+            m = checkpoint(self.line_layers[i], m, data.edge_index_lg, a, use_reentrant=False)
             
             # 2. Update Atoms (Atom Graph)
-            # Input: Atom Features (h), Graph: Bonds (edge_index, m)
-            h = self.atom_layers[i](x=h, edge_index=data.edge_index, edge_attr=m)
+            # Original: h = self.atom_layers[i](h, data.edge_index, m)
+            h = checkpoint(self.atom_layers[i], h, data.edge_index, m, use_reentrant=False)
             
         # C. Readout & Predict
         c = self.pool(h, data.batch)
