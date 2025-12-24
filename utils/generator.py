@@ -1,102 +1,107 @@
 import os
-import itertools
-from pathlib import Path
 import numpy as np
-import pandas as pd
 from pymatgen.core import Structure, Lattice, Element
+from pymatgen.analysis.structure_prediction.substitutor import Substitutor
 
-# --- CONFIGURATION ---
-# 1. Define your "Menu" of ingredients
-# We include oxidation states to ensure charge balance
-A_sites = {
-    'Cs': (+1, 1.88), 'Rb': (+1, 1.72), 'K': (+1, 1.64), 
-    'Ba': (+2, 1.61), 'Sr': (+2, 1.44)
+# --- CONFIG ---
+OUTPUT_DIR = "candidates_exotic"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Define the "Exotic" Search Space
+# We focus on two charge-balanced families:
+
+# FAMILY 1: Chalcogenides (A2+ B4+ X3) 
+# Target: Solar Absorbers
+exotic_chalcogenides = {
+    "A": ["Ba", "Sr", "Ca", "Eu", "Yb"],  # Eu/Yb are Rare Earths that can be 2+
+    "B": ["Hf", "Zr", "Ti", "Ce", "Th"],  # Hf is the main target here
+    "X": ["S", "Se"]
 }
 
-B_sites = {
-    'Sn': (+2, 1.18), 'Ge': (+2, 0.73), # Lead-free group IV
-    'Bi': (+3, 1.03), 'Sb': (+3, 0.76), # Trivalent
-    'Ti': (+4, 0.605), 'Zr': (+4, 0.72) # Quadrivalent
-}
-
-X_sites = {
-    'I': (-1, 2.20), 'Br': (-1, 1.96), 'Cl': (-1, 1.81), # Halides
-    'O': (-2, 1.35), 'S': (-2, 1.84) # Chalcogenides
+# FAMILY 2: Halides (A1+ B2+ X3)
+# Target: Magnetic Semiconductors / exotic electronics
+exotic_halides = {
+    "A": ["Cs", "Rb", "K"], 
+    "B": ["V", "Mn", "Fe", "Co", "Ni", "Cu", "Mg", "Zn"], # 3d Transition Metals
+    "X": ["Cl", "Br", "I"]
 }
 
 def calculate_tolerance_factor(r_a, r_b, r_x):
-    """
-    Goldschmidt Tolerance Factor (t).
-    Ideal cubic perovskites have 0.8 < t < 1.0
-    """
+    """Goldschmidt Tolerance Factor: t = (r_a + r_x) / sqrt(2)*(r_b + r_x)"""
     return (r_a + r_x) / (np.sqrt(2) * (r_b + r_x))
 
-def generate_hypothetical_materials():
-    # Get the script's directory and build paths relative to project root
-    script_dir = Path(__file__).parent
-    project_root = script_dir.parent  # Go up from scripts/ to project root
-    output_dir = project_root / "candidates"
-    
-    output_dir.mkdir(exist_ok=True)
-    
-    candidates = []
-    
-    # Iterate through every possible combination (Cartesian Product)
-    for a_sym, b_sym, x_sym in itertools.product(A_sites, B_sites, X_sites):
-        
-        # Unpack properties
-        a_chg, r_a = A_sites[a_sym]
-        b_chg, r_b = B_sites[b_sym]
-        x_chg, r_x = X_sites[x_sym]
-        
-        # --- FILTER 1: Charge Neutrality ---
-        # A + B + 3*X must equal 0
-        net_charge = a_chg + b_chg + (3 * x_chg)
-        if net_charge != 0:
-            continue # Skip invalid physics (e.g., Cs+ Sn+2 O-2 is not neutral)
+def generate():
+    count = 0
+    print(f"Generating Exotic Candidates into {OUTPUT_DIR}...")
 
-        # --- FILTER 2: Geometric Stability (Tolerance Factor) ---
-        t = calculate_tolerance_factor(r_a, r_b, r_x)
-        if t < 0.8 or t > 1.1:
-            continue # Structure likely won't form a perovskite
+    # --- GENERATE CHALCOGENIDES ---
+    for a in exotic_chalcogenides["A"]:
+        for b in exotic_chalcogenides["B"]:
+            for x in exotic_chalcogenides["X"]:
+                
+                # 1. Physics Check (Radii)
+                try:
+                    r_a = Element(a).atomic_radius
+                    r_b = Element(b).atomic_radius
+                    r_x = Element(x).atomic_radius
+                    
+                    if None in [r_a, r_b, r_x]: continue
+                    
+                    t = calculate_tolerance_factor(r_a, r_b, r_x)
+                    
+                    # Filter: Keep only geometrically plausible perovskites
+                    # Relaxed range: 0.8 < t < 1.1 (Slightly distorted is fine)
+                    if not (0.8 <= t <= 1.1):
+                        continue
+                        
+                except:
+                    continue
 
-        # --- STRUCTURE GENERATION ---
-        # We estimate lattice parameter 'a' based on the B-X bond
-        # In an ideal cubic perovskite, a = 2 * (r_b + r_x)
-        a_est = 2.0 * (r_b + r_x)
-        
-        # Create the Cubic Perovskite (Space Group Pm-3m, #221)
-        # Positions: A=(0,0,0), B=(0.5,0.5,0.5), X=(0.5,0.5,0), (0.5,0,0.5), (0,0.5,0.5)
-        lattice = Lattice.from_parameters(a_est, a_est, a_est, 90, 90, 90)
-        species = [a_sym, b_sym, x_sym, x_sym, x_sym]
-        coords = [
-            [0, 0, 0],          # A-site (Corner)
-            [0.5, 0.5, 0.5],    # B-site (Center)
-            [0.5, 0.5, 0.0],    # X-site (Face Center 1)
-            [0.5, 0.0, 0.5],    # X-site (Face Center 2)
-            [0.0, 0.5, 0.5]     # X-site (Face Center 3)
-        ]
-        
-        struct = Structure(lattice, species, coords)
-        
-        # Save to file
-        formula = f"{a_sym}{b_sym}{x_sym}3"
-        filename = f"{formula}.cif"
-        struct.to(filename=str(output_dir / filename))
-        
-        candidates.append({
-            "formula": formula,
-            "filename": filename,
-            "t_factor": t,
-            "lattice_param": a_est
-        })
+                # 2. Build Crystal (Ideal Cubic Pm-3m as starting point)
+                # Lattice constant guess: 2 * (r_b + r_x) is a rough approximation
+                a_lat = 2.0 * (r_b + r_x)
+                lattice = Lattice.from_parameters(a_lat, a_lat, a_lat, 90, 90, 90)
+                
+                # Perovskite Coordinates (Pm-3m)
+                # A: (0,0,0), B: (0.5, 0.5, 0.5), X: (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)
+                species = [a, b, x, x, x]
+                coords = [
+                    [0, 0, 0],
+                    [0.5, 0.5, 0.5],
+                    [0.5, 0.5, 0.0],
+                    [0.5, 0.0, 0.5],
+                    [0.0, 0.5, 0.5]
+                ]
+                
+                struct = Structure(lattice, species, coords)
+                
+                # 3. Save
+                formula = struct.composition.reduced_formula
+                filename = os.path.join(OUTPUT_DIR, f"{formula}.cif")
+                struct.to(filename=filename)
+                count += 1
 
-    # Save summary registry
-    df = pd.DataFrame(candidates)
-    csv_path = output_dir / "candidates.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"Generated {len(df)} physically valid candidates in '{output_dir}'")
-    print(df.head())
+    # --- GENERATE HALIDES ---
+    for a in exotic_halides["A"]:
+        for b in exotic_halides["B"]:
+            for x in exotic_halides["X"]:
+                # Repeat Logic (Condensed)
+                try:
+                    r_a = Element(a).atomic_radius
+                    r_b = Element(b).atomic_radius
+                    r_x = Element(x).atomic_radius
+                    if not (0.8 <= calculate_tolerance_factor(r_a, r_b, r_x) <= 1.1): continue
+                    
+                    a_lat = 2.0 * (r_b + r_x)
+                    lattice = Lattice.from_parameters(a_lat, a_lat, a_lat, 90, 90, 90)
+                    struct = Structure(lattice, [a, b, x, x, x], [[0,0,0], [0.5,0.5,0.5], [0.5,0.5,0], [0.5,0,0.5], [0,0.5,0.5]])
+                    
+                    filename = os.path.join(OUTPUT_DIR, f"{struct.composition.reduced_formula}.cif")
+                    struct.to(filename=filename)
+                    count += 1
+                except: pass
+
+    print(f"✅ Successfully generated {count} exotic candidates.")
 
 if __name__ == "__main__":
-    generate_hypothetical_materials()
+    generate()

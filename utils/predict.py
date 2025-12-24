@@ -18,7 +18,7 @@ from models.alignn import ALIGNN
 from build_graphs import get_atom_features # We still use the basic atom featurizer
 
 # --- CONFIG ---
-CANDIDATES_DIR = project_root / "candidates"
+CANDIDATES_DIR = project_root / "candidates_exotic"
 MODEL_PATH = project_root / "checkpoints/best_model.pth"
 OUTPUT_FILE = project_root / "final_predictions_alignn.csv"
 
