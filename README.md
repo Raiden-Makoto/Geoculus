@@ -72,8 +72,8 @@ We implemented **ALIGNN (Atomistic Line Graph Neural Network)** which explicitly
 3.  **GatedGCN Layers:** Uses an Attention-like gating mechanism to filter information flow.
 
 ### Performance Metrics
-* **Stability MAE:** `0.045 eV/atom` (Research Grade Precision).
-* **Band Gap MAE:** `0.429 eV` (Sufficient to distinguish Metals from Semiconductors).
+* **Stability MAE:** `0.038 eV/atom` (Research Grade Precision).
+* **Band Gap MAE:** `0.329 eV` (Sufficient to distinguish Metals from Semiconductors).
 
 ---
 
