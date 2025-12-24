@@ -71,7 +71,11 @@ class CrystallGNN(nn.Module):
         # 4. Prediction
         c = F.relu(self.fc_shared(c))
         
-        out_bg = self.head_bandgap(c)
+        # Band gap: output in log space (log1p) to handle long tail distribution
+        out_bg_raw = self.head_bandgap(c)
+        out_bg = torch.log1p(torch.clamp(out_bg_raw, min=0.0))  # Ensure non-negative before log
+        
+        # e_hull: output in original space
         out_ehull = self.head_ehull(c)
         
         return out_bg, out_ehull

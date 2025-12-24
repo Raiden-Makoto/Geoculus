@@ -58,8 +58,9 @@ def train():
     
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
-    # Loss Function: MSE is standard for regression
-    criterion = nn.MSELoss()
+    # Loss Functions: L1Loss (MAE) for robustness against outliers
+    criterion_bg = nn.L1Loss()
+    criterion_ehull = nn.L1Loss()
     
     # Scheduler: Reduce LR if validation loss stops improving
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
@@ -79,16 +80,21 @@ def train():
             optimizer.zero_grad()
             
             # Forward Pass
-            pred_bg, pred_ehull = model(batch)
+            pred_bg_log, pred_ehull = model(batch)  # Model outputs log(Eg) for band gap
             
-            # Compute Loss
-            # We predict two things, so we sum the losses
-            loss_bg = criterion(pred_bg.squeeze(), batch.y_bandgap)
-            loss_ehull = criterion(pred_ehull.squeeze(), batch.y_ehull)
+            # --- FIX: Log-Space Training ---
+            # 1. Transform Targets: Compress the high values
+            target_bg_log = torch.log1p(batch.y_bandgap)
             
-            # Weighted Loss: You might care more about stability than bandgap
-            # loss = 1.0 * loss_bg + 5.0 * loss_ehull 
-            loss = loss_bg + loss_ehull
+            # 2. Compute Loss in Log-Space
+            # We use L1Loss (MAE) on the logs for maximum robustness against outliers
+            loss_bg = criterion_bg(pred_bg_log.squeeze(), target_bg_log)
+            
+            # Stability uses standard linear clamping (as before)
+            loss_ehull = criterion_ehull(pred_ehull.squeeze(), torch.clamp(batch.y_ehull, max=0.5))
+            
+            # Combine with weighted loss (stability is 5x more important)
+            loss = loss_bg + (5.0 * loss_ehull)
             
             # Backward Pass
             loss.backward()
@@ -99,8 +105,10 @@ def train():
 
         # 4. Validation Loop
         avg_train_loss = total_loss / len(train_loader)
-        val_loss, mae_bg, mae_ehull = evaluate(model, val_loader, criterion)
+        mae_bg, mae_ehull = evaluate(model, val_loader)
         
+        # Calculate validation loss for scheduler
+        val_loss = mae_bg + (5.0 * mae_ehull)
         scheduler.step(val_loss)
 
         # Print Stats
@@ -113,28 +121,26 @@ def train():
             torch.save(model.state_dict(), checkpoint_dir / "best_model.pth")
             print("    >> Model Saved!")
 
-def evaluate(model, loader, criterion):
+def evaluate(model, loader):
     model.eval()
-    total_loss = 0
-    abs_err_bg = 0
-    abs_err_ehull = 0
+    mae_bg = 0
+    mae_ehull = 0
     
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(DEVICE)
-            pred_bg, pred_ehull = model(batch)
+            pred_bg_log, pred_ehull = model(batch)  # Model outputs Log(Eg) for band gap
             
-            loss_bg = criterion(pred_bg.squeeze(), batch.y_bandgap)
-            loss_ehull = criterion(pred_ehull.squeeze(), batch.y_ehull)
+            # --- IMPORTANT: Un-Log for Human Metrics ---
+            # Convert predictions back to eV: exp(x) - 1
+            pred_bg_real = torch.expm1(pred_bg_log.squeeze())
             
-            total_loss += (loss_bg + loss_ehull).item()
-            
-            # Calculate Mean Absolute Error (MAE) for human readability
-            abs_err_bg += (pred_bg.squeeze() - batch.y_bandgap).abs().sum().item()
-            abs_err_ehull += (pred_ehull.squeeze() - batch.y_ehull).abs().sum().item()
+            # Calculate real MAE in eV
+            mae_bg += (pred_bg_real - batch.y_bandgap).abs().sum().item()
+            mae_ehull += (pred_ehull.squeeze() - batch.y_ehull).abs().sum().item()
             
     num_samples = len(loader.dataset)
-    return total_loss / len(loader), abs_err_bg / num_samples, abs_err_ehull / num_samples
+    return mae_bg / num_samples, mae_ehull / num_samples
 
 if __name__ == "__main__":
     train()
